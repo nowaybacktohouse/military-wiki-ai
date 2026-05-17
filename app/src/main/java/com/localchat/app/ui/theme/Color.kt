@@ -21,4 +21,9 @@ object LocalChatColors {
     val pinned = Color(0xFFFFD600)
     val downloadBar = Color(0xFF6C63FF)
     val downloadBarTrack = Color(0xFF2A2A2A)
+    val link = Color(0xFF64B5F6)
+    val codeBg = Color(0xFF1A1A2E)
+    val amoledBackground = Color(0xFF000000)
+    val amoledSurface = Color(0xFF0A0A0A)
+    val amoledCard = Color(0xFF0F0F0F)
 }

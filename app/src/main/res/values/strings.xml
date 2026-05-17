@@ -4,4 +4,78 @@
     <string name="tab_chat">Чат</string>
     <string name="tab_knowledge">Знания</string>
     <string name="tab_settings">Настройки</string>
+    <string name="tab_search">Поиск</string>
+    <string name="tab_dumps">Дампы</string>
+    <string name="tab_custom_dump">Свой дамп</string>
+
+    <!-- Chat -->
+    <string name="model_not_selected">Модель не выбрана</string>
+    <string name="welcome_title">Добро пожаловать в LocalChat</string>
+    <string name="welcome_subtitle">Выберите и загрузите модель в настройках, чтобы начать общение</string>
+    <string name="type_message">Введите сообщение…</string>
+    <string name="send">Отправить</string>
+    <string name="generating">Генерация…</string>
+    <string name="stop">Стоп</string>
+    <string name="regenerate">Повторить</string>
+    <string name="clear_chat">Очистить чат</string>
+    <string name="copied">Скопировано</string>
+    <string name="dismiss">Закрыть</string>
+
+    <!-- Knowledge Search -->
+    <string name="search_articles">Поиск статей…</string>
+    <string name="clear">Очистить</string>
+    <string name="filter_all">Все</string>
+    <string name="articles_found">Статей найдено</string>
+    <string name="search_error">Ошибка поиска</string>
+    <string name="no_results">Ничего не найдено</string>
+    <string name="no_articles">Нет загруженных статей</string>
+    <string name="load_more">Загрузить ещё</string>
+    <string name="close">Закрыть</string>
+
+    <!-- Dumps -->
+    <string name="pinned_dumps">Закреплённые</string>
+    <string name="built_in">Встроен</string>
+    <string name="downloaded">Загружен</string>
+    <string name="download">Скачать</string>
+    <string name="delete">Удалить</string>
+
+    <!-- Custom Dump -->
+    <string name="custom_dump_title">Загрузить свой дамп</string>
+    <string name="custom_dump_instructions">Вы можете загрузить дамп статей из Википедии или другого источника. Скачайте файл дампа и выберите его через файловый менеджер.</string>
+    <string name="supported_formats">Поддерживаемые форматы:</string>
+    <string name="pick_file">Выбрать файл</string>
+    <string name="importing">Импорт…</string>
+    <string name="useful_links">Полезные ссылки</string>
+    <string name="link_copied">Ссылка скопирована</string>
+
+    <!-- Settings Models -->
+    <string name="section_models">Модели</string>
+    <string name="section_generation">Генерация</string>
+    <string name="section_appearance">Оформление</string>
+    <string name="section_about">О приложении</string>
+    <string name="device_ram">RAM устройства</string>
+    <string name="recommended">Рекомендуется</string>
+    <string name="active">Активна</string>
+    <string name="use_model">Использовать</string>
+
+    <!-- Settings Generation -->
+    <string name="system_prompt">Системный промпт</string>
+    <string name="save">Сохранить</string>
+    <string name="temperature">Температура</string>
+    <string name="temperature_hint">Низкая = точнее, высокая = креативнее</string>
+    <string name="max_tokens">Макс. токенов</string>
+    <string name="max_tokens_hint">Максимальная длина ответа</string>
+
+    <!-- Settings Appearance -->
+    <string name="theme_title">Тема оформления</string>
+    <string name="theme_system">Системная</string>
+    <string name="theme_light">Светлая</string>
+    <string name="theme_dark">Тёмная</string>
+    <string name="theme_amoled">AMOLED чёрная</string>
+
+    <!-- About -->
+    <string name="about_description">LocalChat — полностью локальный офлайн-чатбот с поддержкой LLM через llama.cpp и базой знаний на основе дампов Википедии. Работает без интернета. Интернет нужен только для скачивания моделей и дампов.</string>
+    <string name="about_author">author: nowayqq aka Денис Федоров</string>
+    <string name="about_features">• Локальные нейросети (GGUF через llama.cpp)\n• 20+ моделей от лёгких до тяжёлых\n• Модели без цензуры\n• Полнотекстовый поиск по базе знаний\n• RAG-режим (использование знаний в чате)\n• Markdown-рендеринг ответов\n• Скачивание дампов Википедии\n• Импорт своих дампов\n• Поддержка ARM64, ARM32, x86, x86_64\n• Android 8.0+ (API 26+)</string>
+    <string name="crash_logs">Логи ошибок</string>
 </resources>

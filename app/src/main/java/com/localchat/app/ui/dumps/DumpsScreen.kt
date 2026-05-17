@@ -1,349 +1,457 @@
 package com.localchat.app.ui.dumps
 
-import android.app.Application
-import androidx.compose.foundation.background
+import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.localchat.app.R
 import com.localchat.app.data.model.DumpCatalog
+import com.localchat.app.data.model.DumpCategory
 import com.localchat.app.data.model.DumpInfo
-import com.localchat.app.service.DownloadProgress
-import com.localchat.app.service.DownloadService
 import com.localchat.app.service.KnowledgeArticle
-import com.localchat.app.service.KnowledgeDatabase
 import com.localchat.app.ui.theme.LocalChatColors
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.collectLatest
 
-class DumpsViewModel(application: Application) : AndroidViewModel(application) {
-    private val db = KnowledgeDatabase(application)
-    private val downloadService = DownloadService(application)
-
-    private val _searchResults = MutableStateFlow<List<KnowledgeArticle>>(emptyList())
-    val searchResults: StateFlow<List<KnowledgeArticle>> = _searchResults.asStateFlow()
-
-    private val _articleCount = MutableStateFlow(0)
-    val articleCount: StateFlow<Int> = _articleCount.asStateFlow()
-
-    private val _isSearching = MutableStateFlow(false)
-    val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
-
-    private val _downloads = MutableStateFlow<Map<String, DownloadProgress>>(emptyMap())
-    val downloads: StateFlow<Map<String, DownloadProgress>> = _downloads.asStateFlow()
-
-    private val _installedDumps = MutableStateFlow<Set<String>>(setOf("military-mini"))
-    val installedDumps: StateFlow<Set<String>> = _installedDumps.asStateFlow()
-
-    private val _categories = MutableStateFlow<List<Pair<String, Int>>>(emptyList())
-    val categories: StateFlow<List<Pair<String, Int>>> = _categories.asStateFlow()
-
-    private val _selectedTab = MutableStateFlow(0)
-    val selectedTab: StateFlow<Int> = _selectedTab.asStateFlow()
-
-    init {
-        viewModelScope.launch {
-            try { db.importMilitaryDump(application) } catch (_: Exception) {}
-            refreshData()
-        }
-    }
-
-    private suspend fun refreshData() {
-        try {
-            _articleCount.value = db.getArticleCount()
-            _categories.value = db.getCategories()
-        } catch (_: Exception) {}
-    }
-
-    fun selectTab(tab: Int) { _selectedTab.value = tab }
-
-    fun search(query: String) {
-        if (query.isBlank()) {
-            _searchResults.value = emptyList()
-            return
-        }
-        viewModelScope.launch {
-            _isSearching.value = true
-            try {
-                _searchResults.value = db.search(query, limit = 20)
-            } catch (_: Exception) {
-                _searchResults.value = emptyList()
-            }
-            _isSearching.value = false
-        }
-    }
-
-    fun downloadDump(dump: DumpInfo) {
-        viewModelScope.launch {
-            _downloads.value = _downloads.value + (dump.id to DownloadProgress(0, dump.sizeBytes))
-            try {
-                val app = getApplication<Application>()
-                val file = java.io.File(app.filesDir, "dumps/${dump.fileName}")
-                file.parentFile?.mkdirs()
-                downloadService.download(dump.downloadUrl, dump.fileName, file.parentFile!!).collect { progress ->
-                    _downloads.value = _downloads.value + (dump.id to progress)
-                    if (progress.isComplete) {
-                        _installedDumps.value = _installedDumps.value + dump.id
-                        refreshData()
-                    }
-                }
-            } catch (e: Exception) {
-                _downloads.value = _downloads.value + (dump.id to DownloadProgress(0, dump.sizeBytes, error = e.message))
-            }
-        }
-    }
-
-    fun deleteDump(dump: DumpInfo) {
-        viewModelScope.launch {
-            db.deleteDump(dump.id)
-            _installedDumps.value = _installedDumps.value - dump.id
-            refreshData()
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun DumpsScreen(modifier: Modifier = Modifier, viewModel: DumpsViewModel = viewModel()) {
-    val searchResults by viewModel.searchResults.collectAsState()
-    val articleCount by viewModel.articleCount.collectAsState()
-    val isSearching by viewModel.isSearching.collectAsState()
-    val downloads by viewModel.downloads.collectAsState()
-    val installedDumps by viewModel.installedDumps.collectAsState()
-    val categories by viewModel.categories.collectAsState()
-    val selectedTab by viewModel.selectedTab.collectAsState()
-    var searchQuery by remember { mutableStateOf("") }
+fun DumpsScreen(viewModel: DumpsViewModel = viewModel()) {
+    var selectedTab by remember { mutableIntStateOf(0) }
+    val tabs = listOf(
+        stringResource(R.string.tab_search),
+        stringResource(R.string.tab_dumps),
+        stringResource(R.string.tab_custom_dump)
+    )
 
-    Column(modifier = modifier.fillMaxSize().background(LocalChatColors.background)) {
-        // Header
-        Surface(modifier = Modifier.fillMaxWidth(), color = LocalChatColors.surface, tonalElevation = 2.dp) {
-            Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-                Text("Знания", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = LocalChatColors.onSurface)
-                Text("$articleCount статей в базе", fontSize = 13.sp, color = LocalChatColors.onSurfaceVariant)
-            }
-        }
-
-        // Tabs
+    Column(modifier = Modifier.fillMaxSize()) {
         TabRow(
             selectedTabIndex = selectedTab,
-            containerColor = LocalChatColors.surface,
+            containerColor = MaterialTheme.colorScheme.surface,
             contentColor = LocalChatColors.primary
         ) {
-            Tab(selected = selectedTab == 0, onClick = { viewModel.selectTab(0) }, text = { Text("Поиск") })
-            Tab(selected = selectedTab == 1, onClick = { viewModel.selectTab(1) }, text = { Text("Дампы") })
-            Tab(selected = selectedTab == 2, onClick = { viewModel.selectTab(2) }, text = { Text("Свой дамп") })
+            tabs.forEachIndexed { index, title ->
+                Tab(
+                    selected = selectedTab == index,
+                    onClick = { selectedTab = index },
+                    text = { Text(title, fontSize = 13.sp, maxLines = 1) }
+                )
+            }
         }
 
         when (selectedTab) {
-            0 -> SearchTab(searchQuery, { searchQuery = it; viewModel.search(it) }, searchResults, isSearching, categories)
-            1 -> DumpsTab(downloads, installedDumps, viewModel)
-            2 -> CustomDumpTab()
+            0 -> SearchTab(viewModel)
+            1 -> DumpsTab(viewModel)
+            2 -> CustomDumpTab(viewModel)
         }
     }
 }
 
+@OptIn(FlowPreview::class)
 @Composable
-fun SearchTab(query: String, onQueryChange: (String) -> Unit, results: List<KnowledgeArticle>, isSearching: Boolean, categories: List<Pair<String, Int>>) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        item {
-            OutlinedTextField(
-                value = query,
-                onValueChange = onQueryChange,
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Поиск по базе знаний...", color = LocalChatColors.onSurfaceVariant) },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = LocalChatColors.onSurfaceVariant) },
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = LocalChatColors.onSurface,
-                    unfocusedTextColor = LocalChatColors.onSurface,
-                    focusedBorderColor = LocalChatColors.primary,
-                    unfocusedBorderColor = LocalChatColors.surfaceVariant,
-                    cursorColor = LocalChatColors.primary,
-                    focusedContainerColor = LocalChatColors.surfaceVariant,
-                    unfocusedContainerColor = LocalChatColors.surfaceVariant
-                ),
-                shape = RoundedCornerShape(12.dp),
-                singleLine = true
+fun SearchTab(viewModel: DumpsViewModel) {
+    val articles by viewModel.searchResults.collectAsState()
+    val isSearching by viewModel.isSearching.collectAsState()
+    val searchError by viewModel.searchError.collectAsState()
+    val availableSources by viewModel.availableSources.collectAsState()
+    val selectedSources by viewModel.selectedSources.collectAsState()
+    val articleCount by viewModel.articleCount.collectAsState()
+
+    var query by remember { mutableStateOf("") }
+
+    // Debounce search - 300ms
+    LaunchedEffect(Unit) {
+        snapshotFlow { query }
+            .debounce(300)
+            .collectLatest { q ->
+                viewModel.search(q)
+            }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Search bar
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            placeholder = { Text(stringResource(R.string.search_articles), fontSize = 14.sp) },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+            trailingIcon = {
+                if (query.isNotEmpty()) {
+                    IconButton(onClick = { query = "" }) {
+                        Icon(Icons.Default.Clear, contentDescription = stringResource(R.string.clear))
+                    }
+                }
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(24.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = LocalChatColors.primary,
+                unfocusedBorderColor = LocalChatColors.surfaceVariant
+            )
+        )
+
+        // Filter chips
+        if (availableSources.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                @OptIn(ExperimentalMaterial3Api::class)
+                FilterChip(
+                    selected = selectedSources.isEmpty(),
+                    onClick = { viewModel.clearSourceFilter() },
+                    label = { Text(stringResource(R.string.filter_all), fontSize = 12.sp) }
+                )
+                availableSources.forEach { (source, count) ->
+                    @OptIn(ExperimentalMaterial3Api::class)
+                    FilterChip(
+                        selected = source in selectedSources,
+                        onClick = { viewModel.toggleSource(source) },
+                        label = { Text("${getSourceLabel(source)} ($count)", fontSize = 12.sp) }
+                    )
+                }
+            }
+        }
+
+        // Article count
+        Text(
+            text = "${stringResource(R.string.articles_found)}: $articleCount",
+            fontSize = 12.sp,
+            color = LocalChatColors.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+        )
+
+        // Search error snackbar
+        searchError?.let { err ->
+            Text(
+                text = "${stringResource(R.string.search_error)}: $err",
+                fontSize = 12.sp,
+                color = LocalChatColors.error,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
             )
         }
 
-        if (isSearching) {
-            item {
-                Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = LocalChatColors.primary)
+        // Results
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (isSearching) {
+                item {
+                    Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = LocalChatColors.primary)
+                    }
                 }
-            }
-        }
+            } else {
+                items(articles, key = { it.id }) { article ->
+                    ArticleCard(article = article, onClick = { viewModel.selectArticle(article) })
+                }
 
-        if (query.isBlank() && categories.isNotEmpty()) {
-            item {
-                Text("Категории", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = LocalChatColors.onSurface)
-            }
-            items(categories) { (cat, count) ->
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = LocalChatColors.card),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Folder, contentDescription = null, tint = LocalChatColors.primary, modifier = Modifier.size(20.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(cat, fontSize = 14.sp, color = LocalChatColors.onSurface, modifier = Modifier.weight(1f))
-                        Text("$count", fontSize = 13.sp, color = LocalChatColors.onSurfaceVariant)
+                if (articles.isEmpty() && !isSearching) {
+                    item {
+                        Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                            Text(
+                                text = if (query.isNotBlank()) stringResource(R.string.no_results) else stringResource(R.string.no_articles),
+                                fontSize = 14.sp,
+                                color = LocalChatColors.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                // Load more
+                if (articles.size >= 50) {
+                    item {
+                        TextButton(
+                            onClick = { viewModel.loadMore() },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(stringResource(R.string.load_more))
+                        }
                     }
                 }
             }
-        }
 
-        if (query.isNotBlank() && !isSearching) {
-            if (results.isEmpty()) {
-                item {
-                    Text("Ничего не найдено", fontSize = 14.sp, color = LocalChatColors.onSurfaceVariant, modifier = Modifier.padding(16.dp))
-                }
-            }
-            items(results) { article ->
-                ArticleCard(article)
-            }
+            item { Spacer(modifier = Modifier.height(80.dp)) }
         }
+    }
+
+    // Article detail dialog
+    val selectedArticle by viewModel.selectedArticle.collectAsState()
+    selectedArticle?.let { article ->
+        ArticleDetailDialog(
+            article = article,
+            onDismiss = { viewModel.clearSelectedArticle() }
+        )
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ArticleCard(article: KnowledgeArticle) {
-    var expanded by remember { mutableStateOf(false) }
+@OptIn(ExperimentalMaterial3Api::class)
+fun ArticleCard(article: KnowledgeArticle, onClick: () -> Unit) {
     Card(
+        onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = LocalChatColors.card),
-        shape = RoundedCornerShape(12.dp),
-        onClick = { expanded = !expanded }
+        shape = RoundedCornerShape(12.dp)
     ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+        Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(article.title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = LocalChatColors.onSurface, modifier = Modifier.weight(1f))
-                Surface(color = LocalChatColors.primary.copy(alpha = 0.2f), shape = RoundedCornerShape(4.dp)) {
-                    Text(article.category, fontSize = 10.sp, color = LocalChatColors.primary, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                }
+                Icon(
+                    imageVector = getSourceIcon(article.dumpId),
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = getSourceColor(article.dumpId)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = getSourceLabel(article.dumpId),
+                    fontSize = 11.sp,
+                    color = getSourceColor(article.dumpId)
+                )
             }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = if (expanded) article.content else article.content.take(150) + if (article.content.length > 150) "..." else "",
-                fontSize = 13.sp, color = LocalChatColors.onSurfaceVariant, lineHeight = 18.sp
+                text = article.title,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
             )
-            if (article.source.isNotBlank()) {
-                Text("Источник: ${article.source}", fontSize = 11.sp, color = LocalChatColors.onSurfaceVariant.copy(alpha = 0.7f))
-            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = article.content.take(200),
+                fontSize = 13.sp,
+                color = LocalChatColors.onSurfaceVariant,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+                lineHeight = 18.sp
+            )
         }
     }
 }
 
-@Suppress("DEPRECATION")
 @Composable
-fun DumpsTab(downloads: Map<String, DownloadProgress>, installedDumps: Set<String>, viewModel: DumpsViewModel) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        // Pinned
-        val pinned = DumpCatalog.dumps.filter { it.isPinned }
-        if (pinned.isNotEmpty()) {
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.PushPin, contentDescription = null, tint = LocalChatColors.pinned, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Закреплённые", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = LocalChatColors.pinned)
+fun ArticleDetailDialog(article: KnowledgeArticle, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(article.title, fontWeight = FontWeight.Bold) },
+        text = {
+            LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
+                item {
+                    Text(
+                        text = article.content,
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
                 }
             }
-            items(pinned) { dump ->
-                DumpCard(dump, installedDumps.contains(dump.id), downloads[dump.id], { viewModel.downloadDump(dump) }, { viewModel.deleteDump(dump) })
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.close)) }
+        },
+        containerColor = LocalChatColors.card
+    )
+}
+
+@Composable
+fun DumpsTab(viewModel: DumpsViewModel) {
+    val downloadProgress by viewModel.downloadProgress.collectAsState()
+    val downloadedDumps by viewModel.downloadedDumps.collectAsState()
+    val context = LocalContext.current
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // Pinned dumps section
+        item {
+            Text(
+                text = stringResource(R.string.pinned_dumps),
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+        }
+
+        val pinned = DumpCatalog.getPinnedDumps()
+        items(pinned, key = { it.id }) { dump ->
+            DumpCard(
+                dump = dump,
+                isDownloaded = dump.isBuiltIn || dump.id in downloadedDumps,
+                progress = downloadProgress[dump.id],
+                onDownload = { viewModel.downloadDump(dump) },
+                onDelete = { viewModel.deleteDump(dump) },
+                isPinned = true
+            )
+        }
+
+        // Categories
+        DumpCategory.entries.filter { it != DumpCategory.MILITARY }.forEach { category ->
+            val categoryDumps = DumpCatalog.getDumpsByCategory(category).filter { !it.isPinned }
+            if (categoryDumps.isNotEmpty()) {
+                item {
+                    Text(
+                        text = category.label,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
+                    )
+                }
+                items(categoryDumps, key = { it.id }) { dump ->
+                    DumpCard(
+                        dump = dump,
+                        isDownloaded = dump.id in downloadedDumps,
+                        progress = downloadProgress[dump.id],
+                        onDownload = { viewModel.downloadDump(dump) },
+                        onDelete = { viewModel.deleteDump(dump) }
+                    )
+                }
             }
         }
 
-        // By category
-        val grouped = DumpCatalog.dumps.filter { !it.isPinned }.groupBy { it.category }
-        for ((category, dumps) in grouped) {
-            item {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("${category.icon} ${category.label}", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = LocalChatColors.onSurface)
-            }
-            items(dumps) { dump ->
-                DumpCard(dump, installedDumps.contains(dump.id), downloads[dump.id], { viewModel.downloadDump(dump) }, { viewModel.deleteDump(dump) })
-            }
-        }
         item { Spacer(modifier = Modifier.height(80.dp)) }
     }
 }
 
-@Suppress("DEPRECATION")
 @Composable
-fun DumpCard(dump: DumpInfo, isInstalled: Boolean, progress: DownloadProgress?, onDownload: () -> Unit, onDelete: () -> Unit) {
-    val isDownloading = progress != null && !progress.isComplete && progress.error == null
+fun DumpCard(
+    dump: DumpInfo,
+    isDownloaded: Boolean,
+    progress: Float?,
+    onDownload: () -> Unit,
+    onDelete: () -> Unit,
+    isPinned: Boolean = false
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = if (dump.isPinned) LocalChatColors.primaryContainer else LocalChatColors.card),
+        colors = CardDefaults.cardColors(containerColor = LocalChatColors.card),
         shape = RoundedCornerShape(12.dp)
     ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+        Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(dump.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = LocalChatColors.onSurface, modifier = Modifier.weight(1f))
+                if (isPinned) {
+                    Icon(Icons.Default.PushPin, contentDescription = null, modifier = Modifier.size(14.dp), tint = LocalChatColors.pinned)
+                    Spacer(modifier = Modifier.width(4.dp))
+                }
+                Text(
+                    text = dump.name,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
+                )
                 if (dump.isBuiltIn) {
-                    Surface(color = LocalChatColors.success.copy(alpha = 0.2f), shape = RoundedCornerShape(4.dp)) {
-                        Text("Встроенный", fontSize = 10.sp, color = LocalChatColors.success, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                    }
-                } else if (isInstalled) {
-                    Surface(color = LocalChatColors.success.copy(alpha = 0.2f), shape = RoundedCornerShape(4.dp)) {
-                        Text("Установлен", fontSize = 10.sp, color = LocalChatColors.success, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                    }
+                    AssistChip(
+                        onClick = {},
+                        label = { Text(stringResource(R.string.built_in), fontSize = 10.sp) },
+                        modifier = Modifier.height(24.dp)
+                    )
                 }
             }
-            if (!dump.isBuiltIn) {
-                Text(dump.sizeFormatted, fontSize = 12.sp, color = LocalChatColors.onSurfaceVariant)
-            }
+
             Spacer(modifier = Modifier.height(4.dp))
-            Text(dump.description, fontSize = 12.sp, color = LocalChatColors.onSurfaceVariant, lineHeight = 16.sp)
-
-            if (isDownloading && progress != null) {
-                Spacer(modifier = Modifier.height(8.dp))
-                LinearProgressIndicator(progress = progress.percent / 100f, modifier = Modifier.fillMaxWidth().height(6.dp), color = LocalChatColors.downloadBar, trackColor = LocalChatColors.downloadBarTrack)
-                Text("${progress.percent}%", fontSize = 11.sp, color = LocalChatColors.onSurfaceVariant)
-            }
-            if (progress?.error != null) {
-                Text("Ошибка: ${progress.error}", fontSize = 11.sp, color = LocalChatColors.error)
-            }
+            Text(
+                text = dump.description,
+                fontSize = 13.sp,
+                color = LocalChatColors.onSurfaceVariant,
+                lineHeight = 18.sp
+            )
 
             if (!dump.isBuiltIn) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = formatFileSize(dump.fileSize),
+                    fontSize = 12.sp,
+                    color = LocalChatColors.onSurfaceVariant
+                )
+
                 Spacer(modifier = Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (!isInstalled && !isDownloading) {
-                        Button(onClick = onDownload, colors = ButtonDefaults.buttonColors(containerColor = LocalChatColors.primary), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
-                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Скачать", fontSize = 13.sp)
-                        }
-                    }
-                    if (isInstalled) {
-                        OutlinedButton(onClick = onDelete, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
-                            Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = LocalChatColors.error)
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Удалить", fontSize = 13.sp, color = LocalChatColors.error)
+
+                if (progress != null && progress < 1f) {
+                    LinearProgressIndicator(
+                        progress = progress,
+                        modifier = Modifier.fillMaxWidth().height(4.dp),
+                        color = LocalChatColors.downloadBar,
+                        trackColor = LocalChatColors.downloadBarTrack
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("${(progress * 100).toInt()}%", fontSize = 12.sp, color = LocalChatColors.primary)
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (isDownloaded) {
+                            AssistChip(
+                                onClick = {},
+                                label = { Text(stringResource(R.string.downloaded), fontSize = 12.sp) },
+                                leadingIcon = { Icon(Icons.Default.CheckCircle, null, modifier = Modifier.size(16.dp), tint = LocalChatColors.success) },
+                                modifier = Modifier.height(32.dp)
+                            )
+                            OutlinedButton(
+                                onClick = onDelete,
+                                modifier = Modifier.height(32.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp)
+                            ) {
+                                Icon(Icons.Default.Delete, null, modifier = Modifier.size(14.dp), tint = LocalChatColors.error)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(stringResource(R.string.delete), fontSize = 12.sp, color = LocalChatColors.error)
+                            }
+                        } else {
+                            Button(
+                                onClick = onDownload,
+                                modifier = Modifier.height(32.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = LocalChatColors.primary),
+                                contentPadding = PaddingValues(horizontal = 12.dp)
+                            ) {
+                                Icon(Icons.Default.Download, null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(stringResource(R.string.download), fontSize = 12.sp)
+                            }
                         }
                     }
                 }
@@ -352,80 +460,30 @@ fun DumpCard(dump: DumpInfo, isInstalled: Boolean, progress: DownloadProgress?, 
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun CustomDumpTab() {
-    var url by remember { mutableStateOf("") }
-    var name by remember { mutableStateOf("") }
+fun CustomDumpTab(viewModel: DumpsViewModel) {
+    val context = LocalContext.current
+    val importProgress by viewModel.importProgress.collectAsState()
+
+    val filePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let { viewModel.importCustomDump(context, it) }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = LocalChatColors.card),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.CloudUpload, contentDescription = null, tint = LocalChatColors.primary, modifier = Modifier.size(28.dp))
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text("Загрузить свой дамп", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = LocalChatColors.onSurface)
-                    }
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text("Укажите URL дампа Wikipedia для загрузки в базу знаний. Поддерживаются XML-дампы Wikimedia.", fontSize = 13.sp, color = LocalChatColors.onSurfaceVariant, lineHeight = 18.sp)
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    OutlinedTextField(
-                        value = name,
-                        onValueChange = { name = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Название дампа") },
-                        placeholder = { Text("Мой дамп", color = LocalChatColors.onSurfaceVariant) },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = LocalChatColors.onSurface,
-                            unfocusedTextColor = LocalChatColors.onSurface,
-                            focusedBorderColor = LocalChatColors.primary,
-                            unfocusedBorderColor = LocalChatColors.surfaceVariant,
-                            cursorColor = LocalChatColors.primary,
-                            focusedLabelColor = LocalChatColors.primary,
-                            unfocusedLabelColor = LocalChatColors.onSurfaceVariant
-                        ),
-                        singleLine = true
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = url,
-                        onValueChange = { url = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("URL дампа") },
-                        placeholder = { Text("https://dumps.wikimedia.org/...", color = LocalChatColors.onSurfaceVariant) },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = LocalChatColors.onSurface,
-                            unfocusedTextColor = LocalChatColors.onSurface,
-                            focusedBorderColor = LocalChatColors.primary,
-                            unfocusedBorderColor = LocalChatColors.surfaceVariant,
-                            cursorColor = LocalChatColors.primary,
-                            focusedLabelColor = LocalChatColors.primary,
-                            unfocusedLabelColor = LocalChatColors.onSurfaceVariant
-                        ),
-                        singleLine = true
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Button(
-                        onClick = { },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = LocalChatColors.primary),
-                        enabled = url.isNotBlank() && name.isNotBlank()
-                    ) {
-                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Загрузить дамп", fontSize = 14.sp)
-                    }
-                }
-            }
+            Text(
+                text = stringResource(R.string.custom_dump_title),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
         }
 
         item {
@@ -434,19 +492,194 @@ fun CustomDumpTab() {
                 colors = CardDefaults.cardColors(containerColor = LocalChatColors.card),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-                    Text("Полезные ссылки", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = LocalChatColors.onSurface)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("dumps.wikimedia.org/ruwiki/latest/ - Русская Вики", fontSize = 13.sp, color = LocalChatColors.primary)
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = stringResource(R.string.custom_dump_instructions),
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        lineHeight = 20.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = stringResource(R.string.supported_formats),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text("dumps.wikimedia.org/enwiki/latest/ - English Wiki", fontSize = 13.sp, color = LocalChatColors.primary)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text("dumps.wikimedia.org/ukwiki/latest/ - Украинская Вики", fontSize = 13.sp, color = LocalChatColors.primary)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text("dumps.wikimedia.org/dewiki/latest/ - Немецкая Вики", fontSize = 13.sp, color = LocalChatColors.primary)
+                    Text(
+                        text = ".xml, .xml.bz2, .json, .zim",
+                        fontSize = 13.sp,
+                        color = LocalChatColors.onSurfaceVariant
+                    )
                 }
             }
         }
+
+        // SAF file picker button
+        item {
+            Button(
+                onClick = {
+                    filePicker.launch(arrayOf(
+                        "application/xml",
+                        "text/xml",
+                        "application/json",
+                        "application/octet-stream",
+                        "*/*"
+                    ))
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = LocalChatColors.primary)
+            ) {
+                Icon(Icons.Default.FileOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(stringResource(R.string.pick_file), fontSize = 14.sp)
+            }
+        }
+
+        // Import progress
+        importProgress?.let { progress ->
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = LocalChatColors.card),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = stringResource(R.string.importing),
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = LocalChatColors.downloadBar
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = progress,
+                            fontSize = 12.sp,
+                            color = LocalChatColors.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
+        // Useful links
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = LocalChatColors.card),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                    Text(
+                        text = stringResource(R.string.useful_links),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    val links = listOf(
+                        "https://dumps.wikimedia.org/ruwiki/latest/" to "Russian Wikipedia Dumps",
+                        "https://dumps.wikimedia.org/enwiki/latest/" to "English Wikipedia Dumps",
+                        "https://dumps.wikimedia.org/ukwiki/latest/" to "Ukrainian Wikipedia Dumps",
+                        "https://dumps.wikimedia.org/dewiki/latest/" to "German Wikipedia Dumps",
+                        "https://download.kiwix.org/zim/" to "Kiwix ZIM Files"
+                    )
+
+                    links.forEach { (url, label) ->
+                        ClickableLinkRow(url = url, label = label, context = context)
+                        Spacer(modifier = Modifier.height(6.dp))
+                    }
+                }
+            }
+        }
+
         item { Spacer(modifier = Modifier.height(80.dp)) }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun ClickableLinkRow(url: String, label: String, context: Context) {
+    val annotatedString = buildAnnotatedString {
+        pushStringAnnotation(tag = "URL", annotation = url)
+        withStyle(style = SpanStyle(
+            color = LocalChatColors.link,
+            textDecoration = TextDecoration.Underline,
+            fontSize = 13.sp
+        )) {
+            append(label)
+        }
+        pop()
+    }
+
+    Row(
+        modifier = Modifier.combinedClickable(
+            onClick = {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                context.startActivity(intent)
+            },
+            onLongClick = {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("link", url))
+                Toast.makeText(context, context.getString(R.string.link_copied), Toast.LENGTH_SHORT).show()
+            }
+        ),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(14.dp), tint = LocalChatColors.link)
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(text = annotatedString)
+    }
+}
+
+fun getSourceIcon(dumpId: String): androidx.compose.ui.graphics.vector.ImageVector {
+    return when {
+        dumpId.contains("military") -> Icons.Default.Shield
+        dumpId.contains("ru") -> Icons.Default.Language
+        dumpId.contains("en") -> Icons.Default.Language
+        dumpId.contains("custom") -> Icons.Default.Person
+        else -> Icons.Default.Article
+    }
+}
+
+fun getSourceColor(dumpId: String): androidx.compose.ui.graphics.Color {
+    return when {
+        dumpId.contains("military") -> LocalChatColors.pinned
+        dumpId.contains("ru") -> LocalChatColors.primary
+        dumpId.contains("en") -> LocalChatColors.success
+        dumpId.contains("custom") -> LocalChatColors.warning
+        else -> LocalChatColors.onSurfaceVariant
+    }
+}
+
+fun getSourceLabel(dumpId: String): String {
+    return when {
+        dumpId.contains("military") -> "Military"
+        dumpId.contains("wiki-ru") -> "RU Wiki"
+        dumpId.contains("wiki-en") -> "EN Wiki"
+        dumpId.contains("custom") -> "Custom"
+        dumpId.contains("science") -> "Science"
+        dumpId.contains("history") -> "History"
+        dumpId.contains("tech") -> "Tech"
+        dumpId.contains("medicine") -> "Medicine"
+        dumpId.contains("art") -> "Art"
+        dumpId.contains("programming") -> "Code"
+        else -> dumpId
+    }
+}
+
+fun formatFileSize(bytes: Long): String {
+    return when {
+        bytes >= 1_000_000_000L -> "%.1f GB".format(bytes / 1_000_000_000.0)
+        bytes >= 1_000_000L -> "%.1f MB".format(bytes / 1_000_000.0)
+        bytes >= 1_000L -> "%.1f KB".format(bytes / 1_000.0)
+        else -> "$bytes B"
     }
 }
