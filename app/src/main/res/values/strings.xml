@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LocalChat</string>
+    <string name="tab_chat">Чат</string>
+    <string name="tab_knowledge">Знания</string>
+    <string name="tab_settings">Настройки</string>
+</resources>

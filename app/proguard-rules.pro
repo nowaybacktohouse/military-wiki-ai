@@ -1,0 +1,2 @@
+-keep class com.localchat.app.service.LlamaEngine { *; }
+-keepclassmembers class com.localchat.app.service.LlamaEngine { native <methods>; }
