@@ -1,93 +1,41 @@
 package com.localchat.app.ui.theme
 
+import android.app.Activity
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.Typography
+import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.sp
-
-data class AppColors(
-    val background: Color = Black,
-    val surface: Color = DarkSurface,
-    val surfaceVariant: Color = DarkSurfaceVariant,
-    val card: Color = DarkCard,
-    val primary: Color = Primary,
-    val primaryContainer: Color = PrimaryContainer,
-    val onPrimary: Color = OnPrimary,
-    val onSurface: Color = OnSurface,
-    val onSurfaceVariant: Color = OnSurfaceVariant,
-    val userBubble: Color = UserBubble,
-    val assistantBubble: Color = AssistantBubble,
-    val success: Color = Success,
-    val error: Color = Error,
-    val warning: Color = Warning
-)
-
-val LocalAppColors = staticCompositionLocalOf { AppColors() }
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 
 private val DarkColorScheme = darkColorScheme(
-    primary = Primary,
-    onPrimary = OnPrimary,
-    primaryContainer = PrimaryContainer,
-    background = Black,
-    surface = DarkSurface,
-    surfaceVariant = DarkSurfaceVariant,
-    onBackground = OnSurface,
-    onSurface = OnSurface,
-    onSurfaceVariant = OnSurfaceVariant,
-    error = Error
-)
-
-private val AppTypography = Typography(
-    headlineLarge = TextStyle(
-        fontWeight = FontWeight.Bold,
-        fontSize = 28.sp,
-        color = OnSurface
-    ),
-    headlineMedium = TextStyle(
-        fontWeight = FontWeight.SemiBold,
-        fontSize = 22.sp,
-        color = OnSurface
-    ),
-    titleLarge = TextStyle(
-        fontWeight = FontWeight.SemiBold,
-        fontSize = 18.sp,
-        color = OnSurface
-    ),
-    bodyLarge = TextStyle(
-        fontSize = 16.sp,
-        color = OnSurface
-    ),
-    bodyMedium = TextStyle(
-        fontSize = 14.sp,
-        color = OnSurfaceVariant
-    ),
-    labelSmall = TextStyle(
-        fontSize = 11.sp,
-        color = OnSurfaceVariant
-    )
+    primary = LocalChatColors.primary,
+    onPrimary = LocalChatColors.onPrimary,
+    primaryContainer = LocalChatColors.primaryContainer,
+    background = LocalChatColors.background,
+    surface = LocalChatColors.surface,
+    surfaceVariant = LocalChatColors.surfaceVariant,
+    onSurface = LocalChatColors.onSurface,
+    onSurfaceVariant = LocalChatColors.onSurfaceVariant,
+    error = LocalChatColors.error
 )
 
 @Composable
 fun LocalChatTheme(content: @Composable () -> Unit) {
-    val appColors = AppColors()
-    CompositionLocalProvider(LocalAppColors provides appColors) {
-        MaterialTheme(
-            colorScheme = DarkColorScheme,
-            typography = AppTypography,
-            content = content
-        )
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as Activity).window
+            window.statusBarColor = LocalChatColors.background.toArgb()
+            window.navigationBarColor = LocalChatColors.background.toArgb()
+            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
+        }
     }
-}
-
-object LocalChatTheme {
-    val colors: AppColors
-        @Composable
-        get() = LocalAppColors.current
+    MaterialTheme(
+        colorScheme = DarkColorScheme,
+        typography = Typography(),
+        content = content
+    )
 }

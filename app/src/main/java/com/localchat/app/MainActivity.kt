@@ -4,28 +4,17 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Chat
-import androidx.compose.material.icons.filled.MenuBook
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.localchat.app.ui.chat.ChatScreen
 import com.localchat.app.ui.dumps.DumpsScreen
 import com.localchat.app.ui.settings.SettingsScreen
+import com.localchat.app.ui.theme.LocalChatColors
 import com.localchat.app.ui.theme.LocalChatTheme
 
 class MainActivity : ComponentActivity() {
@@ -40,46 +29,48 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-data class NavItem(val label: String, val icon: ImageVector)
+sealed class Screen(val route: String, val title: String, val icon: ImageVector) {
+    object Chat : Screen("chat", "Чат", Icons.Default.Chat)
+    object Knowledge : Screen("knowledge", "Знания", Icons.Default.MenuBook)
+    object Settings : Screen("settings", "Настройки", Icons.Default.Settings)
+}
 
 @Composable
 fun MainScreen() {
-    val navItems = listOf(
-        NavItem("Чат", Icons.Default.Chat),
-        NavItem("Знания", Icons.Default.MenuBook),
-        NavItem("Настройки", Icons.Default.Settings)
-    )
-    var selectedTab by remember { mutableIntStateOf(0) }
+    var selectedScreen by remember { mutableStateOf<Screen>(Screen.Chat) }
+    val screens = listOf(Screen.Chat, Screen.Knowledge, Screen.Settings)
 
     Scaffold(
-        modifier = Modifier.fillMaxSize(),
+        containerColor = LocalChatColors.background,
         bottomBar = {
             NavigationBar(
-                containerColor = LocalChatTheme.colors.surface,
-                contentColor = LocalChatTheme.colors.onSurface
+                containerColor = LocalChatColors.surface,
+                contentColor = LocalChatColors.onSurface
             ) {
-                navItems.forEachIndexed { index, item ->
+                screens.forEach { screen ->
                     NavigationBarItem(
-                        selected = selectedTab == index,
-                        onClick = { selectedTab = index },
-                        icon = { Icon(item.icon, contentDescription = item.label) },
-                        label = { Text(item.label) },
+                        icon = { Icon(screen.icon, contentDescription = screen.title) },
+                        label = { Text(screen.title) },
+                        selected = selectedScreen == screen,
+                        onClick = { selectedScreen = screen },
                         colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = LocalChatTheme.colors.primary,
-                            selectedTextColor = LocalChatTheme.colors.primary,
-                            unselectedIconColor = LocalChatTheme.colors.onSurfaceVariant,
-                            unselectedTextColor = LocalChatTheme.colors.onSurfaceVariant,
-                            indicatorColor = LocalChatTheme.colors.primaryContainer
+                            selectedIconColor = LocalChatColors.primary,
+                            selectedTextColor = LocalChatColors.primary,
+                            unselectedIconColor = LocalChatColors.onSurfaceVariant,
+                            unselectedTextColor = LocalChatColors.onSurfaceVariant,
+                            indicatorColor = LocalChatColors.primaryContainer
                         )
                     )
                 }
             }
         }
-    ) { innerPadding ->
-        when (selectedTab) {
-            0 -> ChatScreen(modifier = Modifier.padding(innerPadding))
-            1 -> DumpsScreen(modifier = Modifier.padding(innerPadding))
-            2 -> SettingsScreen(modifier = Modifier.padding(innerPadding))
+    ) { paddingValues ->
+        Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
+            when (selectedScreen) {
+                Screen.Chat -> ChatScreen()
+                Screen.Knowledge -> DumpsScreen()
+                Screen.Settings -> SettingsScreen()
+            }
         }
     }
 }

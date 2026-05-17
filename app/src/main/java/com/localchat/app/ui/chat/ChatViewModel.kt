@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.localchat.app.data.model.ChatMessage
+import com.localchat.app.service.AppState
 import com.localchat.app.service.KnowledgeDatabase
 import com.localchat.app.service.LlamaEngine
 import kotlinx.coroutines.Job
@@ -23,24 +24,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _isGenerating = MutableStateFlow(false)
     val isGenerating: StateFlow<Boolean> = _isGenerating.asStateFlow()
 
-    private val _isModelLoaded = MutableStateFlow(false)
-    val isModelLoaded: StateFlow<Boolean> = _isModelLoaded.asStateFlow()
+    val isModelLoaded: StateFlow<Boolean> = AppState.isModelLoaded
+    val loadedModelName: StateFlow<String?> = AppState.loadedModelName
 
     private var generateJob: Job? = null
+    private var engineInitialized = false
 
     init {
         llamaEngine.init()
+        engineInitialized = true
         viewModelScope.launch {
-            knowledgeDb.importMilitaryDump(application)
+            try { knowledgeDb.importMilitaryDump(application) } catch (_: Exception) { }
+        }
+        viewModelScope.launch {
+            AppState.loadedModelPath.collect { path ->
+                if (path != null && engineInitialized) {
+                    loadModelInternal(path)
+                }
+            }
         }
     }
 
-    fun loadModel(modelPath: String) {
+    private fun loadModelInternal(modelPath: String) {
         viewModelScope.launch {
-            _isModelLoaded.value = false
             val result = llamaEngine.loadModel(modelPath)
-            _isModelLoaded.value = result.isSuccess
             if (result.isFailure) {
+                AppState.setModelUnloaded()
                 addMessage(ChatMessage(
                     role = ChatMessage.Role.SYSTEM,
                     content = "Ошибка загрузки модели: ${result.exceptionOrNull()?.message}"
@@ -75,11 +84,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     updateLastMessage("[Пустой ответ от модели]")
                 }
             } catch (e: Exception) {
-                val errorMsg = ChatMessage(
+                addMessage(ChatMessage(
                     role = ChatMessage.Role.ASSISTANT,
                     content = "Ошибка: ${e.message}"
-                )
-                addMessage(errorMsg)
+                ))
             } finally {
                 _isGenerating.value = false
             }
@@ -91,9 +99,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val articles = knowledgeDb.search(query, limit = 3)
             if (articles.isEmpty()) return ""
             articles.joinToString("\n\n") { "## ${it.title}\n${it.content}" }
-        } catch (_: Exception) {
-            ""
-        }
+        } catch (_: Exception) { "" }
     }
 
     private fun addMessage(message: ChatMessage) {
@@ -103,16 +109,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun updateLastMessage(content: String) {
         val current = _messages.value.toMutableList()
         if (current.isNotEmpty()) {
-            val last = current.last()
-            current[current.lastIndex] = last.copy(content = content)
+            current[current.lastIndex] = current.last().copy(content = content)
             _messages.value = current
         }
     }
 
-    fun unloadModel() {
-        generateJob?.cancel()
-        llamaEngine.unload()
-        _isModelLoaded.value = false
+    fun clearChat() {
+        _messages.value = emptyList()
     }
 
     override fun onCleared() {

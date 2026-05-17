@@ -7,15 +7,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
@@ -23,47 +22,71 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.localchat.app.data.model.ModelCatalog
 import com.localchat.app.data.model.ModelInfo
+import com.localchat.app.service.AppState
 import com.localchat.app.service.DownloadProgress
 import com.localchat.app.service.DownloadService
-import com.localchat.app.ui.theme.LocalChatTheme
+import com.localchat.app.ui.theme.LocalChatColors
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.io.File
 
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
-    val downloadService = DownloadService(application)
+    private val downloadService = DownloadService(application)
+    private val modelsDir = File(application.filesDir, "models")
 
     private val _downloads = MutableStateFlow<Map<String, DownloadProgress>>(emptyMap())
     val downloads: StateFlow<Map<String, DownloadProgress>> = _downloads.asStateFlow()
 
-    private val _loadedModelId = MutableStateFlow<String?>(null)
-    val loadedModelId: StateFlow<String?> = _loadedModelId.asStateFlow()
+    private val _downloadedModels = MutableStateFlow<Set<String>>(emptySet())
+    val downloadedModels: StateFlow<Set<String>> = _downloadedModels.asStateFlow()
 
-    fun isModelDownloaded(model: ModelInfo): Boolean {
-        return downloadService.isFileDownloaded(model.fileName, downloadService.getModelsDir())
+    val isModelLoaded: StateFlow<Boolean> = AppState.isModelLoaded
+    val loadedModelId: StateFlow<String?> = AppState.loadedModelId
+
+    init {
+        modelsDir.mkdirs()
+        refreshDownloaded()
+    }
+
+    private fun refreshDownloaded() {
+        val downloaded = mutableSetOf<String>()
+        for (model in ModelCatalog.models) {
+            if (File(modelsDir, model.fileName).exists()) {
+                downloaded.add(model.id)
+            }
+        }
+        _downloadedModels.value = downloaded
     }
 
     fun downloadModel(model: ModelInfo) {
+        val file = File(modelsDir, model.fileName)
         viewModelScope.launch {
-            downloadService.download(model.downloadUrl, model.fileName, downloadService.getModelsDir())
-                .collect { progress ->
-                    _downloads.value = _downloads.value + (model.id to progress)
+            downloadService.download(model.downloadUrl, model.fileName, modelsDir).collect { progress ->
+                _downloads.value = _downloads.value + (model.id to progress)
+                if (progress.isComplete) {
+                    refreshDownloaded()
                 }
+            }
         }
     }
 
     fun deleteModel(model: ModelInfo) {
-        downloadService.deleteFile(model.fileName, downloadService.getModelsDir())
-        _downloads.value = _downloads.value - model.id
+        if (AppState.loadedModelId.value == model.id) {
+            AppState.setModelUnloaded()
+        }
+        File(modelsDir, model.fileName).delete()
+        refreshDownloaded()
     }
 
-    fun getModelPath(model: ModelInfo): String {
-        return downloadService.getFilePath(model.fileName, downloadService.getModelsDir())
+    fun loadModel(model: ModelInfo) {
+        val path = File(modelsDir, model.fileName).absolutePath
+        AppState.setModelLoaded(model.id, model.name, path)
     }
 
-    fun setLoadedModel(modelId: String?) {
-        _loadedModelId.value = modelId
+    fun unloadModel() {
+        AppState.setModelUnloaded()
     }
 }
 
@@ -71,189 +94,185 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 @Composable
 fun SettingsScreen(modifier: Modifier = Modifier, viewModel: SettingsViewModel = viewModel()) {
     val downloads by viewModel.downloads.collectAsState()
+    val downloadedModels by viewModel.downloadedModels.collectAsState()
+    val isModelLoaded by viewModel.isModelLoaded.collectAsState()
     val loadedModelId by viewModel.loadedModelId.collectAsState()
-    val context = LocalContext.current
+    var showAbout by remember { mutableStateOf(false) }
 
     LazyColumn(
-        modifier = modifier
-            .fillMaxSize()
-            .background(LocalChatTheme.colors.background),
+        modifier = modifier.fillMaxSize().background(LocalChatColors.background),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Spacer(modifier = Modifier.statusBarsPadding())
-            Text(
-                "Настройки",
-                fontSize = 28.sp,
-                fontWeight = FontWeight.Bold,
-                color = LocalChatTheme.colors.onSurface
-            )
+            Text("Настройки", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = LocalChatColors.onSurface)
             Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                "Управление моделями и настройками",
-                fontSize = 14.sp,
-                color = LocalChatTheme.colors.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                "МОДЕЛИ",
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                color = LocalChatTheme.colors.primary,
-                letterSpacing = 1.sp
-            )
         }
 
-        items(ModelCatalog.models) { model ->
-            val isDownloaded = viewModel.isModelDownloaded(model)
-            val progress = downloads[model.id]
-            val isLoaded = loadedModelId == model.id
-
-            ModelCard(
-                model = model,
-                isDownloaded = isDownloaded,
-                isLoaded = isLoaded,
-                progress = progress,
-                onDownload = { viewModel.downloadModel(model) },
-                onDelete = { viewModel.deleteModel(model) },
-                onLoad = {
-                    val chatVm = (context as? android.app.Activity)?.let { _ ->
-                        viewModel.setLoadedModel(model.id)
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = LocalChatColors.card),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        if (isModelLoaded) Icons.Default.CheckCircle else Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = if (isModelLoaded) LocalChatColors.success else LocalChatColors.warning,
+                        modifier = Modifier.size(32.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            if (isModelLoaded) "Модель активна" else "Модель не загружена",
+                            fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = LocalChatColors.onSurface
+                        )
+                        if (loadedModelId != null) {
+                            val model = ModelCatalog.models.find { it.id == loadedModelId }
+                            Text(model?.name ?: loadedModelId.toString(), fontSize = 13.sp, color = LocalChatColors.onSurfaceVariant)
+                        }
+                    }
+                    if (isModelLoaded) {
+                        OutlinedButton(onClick = { viewModel.unloadModel() }) {
+                            Text("Выгрузить", color = LocalChatColors.warning)
+                        }
                     }
                 }
-            )
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("Нейросети", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = LocalChatColors.onSurface)
+            Text("Скачайте модель и нажмите Загрузить", fontSize = 13.sp, color = LocalChatColors.onSurfaceVariant)
+        }
+
+        item {
+            Text("Стандартные модели", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = LocalChatColors.primary)
+        }
+
+        val standardModels = ModelCatalog.models.filter { !it.isUncensored }
+        items(standardModels) { model ->
+            ModelCard(model = model, isDownloaded = downloadedModels.contains(model.id), isLoaded = loadedModelId == model.id, progress = downloads[model.id], onDownload = { viewModel.downloadModel(model) }, onDelete = { viewModel.deleteModel(model) }, onLoad = { viewModel.loadModel(model) })
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.LocalFireDepartment, contentDescription = null, tint = LocalChatColors.uncensored, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Без цензуры", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = LocalChatColors.uncensored)
+            }
+            Text("Модели без ограничений и фильтров", fontSize = 12.sp, color = LocalChatColors.onSurfaceVariant)
+        }
+
+        val uncensoredModels = ModelCatalog.models.filter { it.isUncensored }
+        items(uncensoredModels) { model ->
+            ModelCard(model = model, isDownloaded = downloadedModels.contains(model.id), isLoaded = loadedModelId == model.id, progress = downloads[model.id], onDownload = { viewModel.downloadModel(model) }, onDelete = { viewModel.deleteModel(model) }, onLoad = { viewModel.loadModel(model) })
         }
 
         item {
             Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                "О ПРИЛОЖЕНИИ",
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                color = LocalChatTheme.colors.primary,
-                letterSpacing = 1.sp
-            )
-            Spacer(modifier = Modifier.height(8.dp))
             Card(
-                colors = CardDefaults.cardColors(containerColor = LocalChatTheme.colors.card),
-                shape = RoundedCornerShape(12.dp)
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = LocalChatColors.card),
+                shape = RoundedCornerShape(12.dp),
+                onClick = { showAbout = !showAbout }
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("LocalChat v1.0", fontWeight = FontWeight.Bold, color = LocalChatTheme.colors.onSurface)
-                    Text("Полностью локальный AI-ассистент", fontSize = 13.sp, color = LocalChatTheme.colors.onSurfaceVariant)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("На базе llama.cpp", fontSize = 13.sp, color = LocalChatTheme.colors.onSurfaceVariant)
-                    Text("Модели: Qwen2.5 (GGUF Q4_K_M)", fontSize = 13.sp, color = LocalChatTheme.colors.onSurfaceVariant)
+                Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Info, contentDescription = null, tint = LocalChatColors.primary)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("О приложении", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = LocalChatColors.onSurface)
+                        Spacer(modifier = Modifier.weight(1f))
+                        Icon(if (showAbout) Icons.Default.ExpandLess else Icons.Default.ExpandMore, contentDescription = null, tint = LocalChatColors.onSurfaceVariant)
+                    }
+                    if (showAbout) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        @Suppress("DEPRECATION")
+                        Divider(color = LocalChatColors.surfaceVariant)
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text("LocalChat v1.0", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = LocalChatColors.primary)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Полностью локальный AI-чатбот для Android.\nРаботает без интернета (кроме загрузки моделей и дампов).\n\nДвижок: llama.cpp (GGUF)\nИнтерфейс: Jetpack Compose Material 3\nБаза знаний: SQLite FTS4\nМин. Android: 8.0 (API 26)\nАрхитектуры: arm64-v8a, armeabi-v7a, x86, x86_64", fontSize = 13.sp, color = LocalChatColors.onSurfaceVariant, lineHeight = 18.sp)
+                        Spacer(modifier = Modifier.height(16.dp))
+                        @Suppress("DEPRECATION")
+                        Divider(color = LocalChatColors.surfaceVariant)
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text("author nowayqq aka Денис Федоров", fontSize = 14.sp, fontWeight = FontWeight.Medium, fontStyle = FontStyle.Italic, color = LocalChatColors.primary, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                    }
                 }
             }
-            Spacer(modifier = Modifier.navigationBarsPadding())
         }
+        item { Spacer(modifier = Modifier.height(80.dp)) }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Suppress("DEPRECATION")
 @Composable
-fun ModelCard(
-    model: ModelInfo,
-    isDownloaded: Boolean,
-    isLoaded: Boolean,
-    progress: DownloadProgress?,
-    onDownload: () -> Unit,
-    onDelete: () -> Unit,
-    onLoad: () -> Unit
-) {
+fun ModelCard(model: ModelInfo, isDownloaded: Boolean, isLoaded: Boolean, progress: DownloadProgress?, onDownload: () -> Unit, onDelete: () -> Unit, onLoad: () -> Unit) {
+    val isDownloading = progress != null && !progress.isComplete && progress.error == null
     Card(
-        colors = CardDefaults.cardColors(
-            containerColor = if (isLoaded) LocalChatTheme.colors.primaryContainer else LocalChatTheme.colors.card
-        ),
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = if (isLoaded) LocalChatColors.primaryContainer else LocalChatColors.card),
         shape = RoundedCornerShape(12.dp)
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "${model.tier.emoji} ${model.name}",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp,
-                    color = LocalChatTheme.colors.onSurface
-                )
-                Spacer(modifier = Modifier.weight(1f))
-                SuggestionChip(
-                    onClick = {},
-                    label = { Text(model.tier.label, fontSize = 11.sp) },
-                    colors = SuggestionChipDefaults.suggestionChipColors(
-                        containerColor = LocalChatTheme.colors.surfaceVariant,
-                        labelColor = LocalChatTheme.colors.primary
-                    )
-                )
+                Text(model.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = LocalChatColors.onSurface)
+                if (model.isUncensored) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Surface(color = LocalChatColors.uncensored.copy(alpha = 0.2f), shape = RoundedCornerShape(4.dp)) {
+                        Text("18+", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = LocalChatColors.uncensored, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                    }
+                }
+                if (isLoaded) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Surface(color = LocalChatColors.success.copy(alpha = 0.2f), shape = RoundedCornerShape(4.dp)) {
+                        Text("ACTIVE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = LocalChatColors.success, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                    }
+                }
             }
+            Text("${model.tier.emoji} ${model.tier.label} | ${model.sizeFormatted}", fontSize = 12.sp, color = LocalChatColors.onSurfaceVariant)
             Spacer(modifier = Modifier.height(4.dp))
-            Text(model.description, fontSize = 13.sp, color = LocalChatTheme.colors.onSurfaceVariant, lineHeight = 18.sp)
-            Spacer(modifier = Modifier.height(4.dp))
-            Text("Размер: ${model.sizeFormatted}", fontSize = 12.sp, color = LocalChatTheme.colors.onSurfaceVariant)
-
-            if (progress != null && !progress.isComplete && progress.error == null) {
+            Text(model.description, fontSize = 12.sp, color = LocalChatColors.onSurfaceVariant, lineHeight = 16.sp)
+            if (isDownloading && progress != null) {
                 Spacer(modifier = Modifier.height(8.dp))
-                @Suppress("DEPRECATION")
-                LinearProgressIndicator(
-                    progress = progress.percent / 100f,
-                    modifier = Modifier.fillMaxWidth(),
-                    color = LocalChatTheme.colors.primary,
-                    trackColor = LocalChatTheme.colors.surfaceVariant
-                )
-                Text(
-                    "${progress.percent}% (${formatBytes(progress.bytesDownloaded)} / ${formatBytes(progress.totalBytes)})",
-                    fontSize = 11.sp,
-                    color = LocalChatTheme.colors.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
+                LinearProgressIndicator(progress = progress.percent / 100f, modifier = Modifier.fillMaxWidth().height(6.dp), color = LocalChatColors.downloadBar, trackColor = LocalChatColors.downloadBarTrack)
+                Text("${progress.percent}%", fontSize = 11.sp, color = LocalChatColors.onSurfaceVariant)
             }
-
             if (progress?.error != null) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text("Ошибка: ${progress.error}", fontSize = 12.sp, color = LocalChatTheme.colors.error)
+                Text("Ошибка: ${progress.error}", fontSize = 11.sp, color = LocalChatColors.error)
             }
-
             Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (!isDownloaded && (progress == null || progress.error != null)) {
-                    Button(
-                        onClick = onDownload,
-                        colors = ButtonDefaults.buttonColors(containerColor = LocalChatTheme.colors.primary),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-                    ) {
+                if (!isDownloaded && !isDownloading) {
+                    Button(onClick = onDownload, colors = ButtonDefaults.buttonColors(containerColor = LocalChatColors.primary), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
                         Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Скачать", fontSize = 13.sp)
                     }
                 }
-                if (isDownloaded) {
-                    Button(
-                        onClick = onLoad,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isLoaded) LocalChatTheme.colors.success else LocalChatTheme.colors.primary
-                        ),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-                    ) {
+                if (isDownloaded && !isLoaded) {
+                    Button(onClick = onLoad, colors = ButtonDefaults.buttonColors(containerColor = LocalChatColors.success), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
                         Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text(if (isLoaded) "Активна" else "Загрузить", fontSize = 13.sp)
+                        Text("Загрузить", fontSize = 13.sp)
                     }
-                    OutlinedButton(
-                        onClick = onDelete,
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-                    ) {
-                        Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = LocalChatTheme.colors.error)
+                }
+                if (isDownloaded) {
+                    OutlinedButton(onClick = onDelete, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+                        Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = LocalChatColors.error)
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Удалить", fontSize = 13.sp, color = LocalChatTheme.colors.error)
+                        Text("Удалить", fontSize = 13.sp, color = LocalChatColors.error)
                     }
                 }
             }
         }
     }
-}
-
-private fun formatBytes(bytes: Long): String {
-    val mb = bytes / (1024.0 * 1024.0)
-    val gb = bytes / (1024.0 * 1024.0 * 1024.0)
-    return if (gb >= 1.0) "%.1f ГБ".format(gb) else "%.0f МБ".format(mb)
 }

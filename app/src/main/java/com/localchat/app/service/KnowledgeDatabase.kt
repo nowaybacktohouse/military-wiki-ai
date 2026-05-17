@@ -15,7 +15,7 @@ data class KnowledgeArticle(
     val source: String
 )
 
-class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge.db", null, 1) {
+class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge.db", null, 2) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
@@ -24,7 +24,8 @@ class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge
                 title TEXT NOT NULL,
                 content TEXT NOT NULL,
                 category TEXT NOT NULL DEFAULT '',
-                source TEXT NOT NULL DEFAULT ''
+                source TEXT NOT NULL DEFAULT '',
+                dump_id TEXT NOT NULL DEFAULT 'military'
             )
         """)
         db.execSQL("""
@@ -45,6 +46,8 @@ class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        db.execSQL("DROP TRIGGER IF EXISTS articles_ai")
+        db.execSQL("DROP TRIGGER IF EXISTS articles_ad")
         db.execSQL("DROP TABLE IF EXISTS articles_fts")
         db.execSQL("DROP TABLE IF EXISTS articles")
         onCreate(db)
@@ -52,112 +55,124 @@ class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge
 
     suspend fun search(query: String, limit: Int = 5): List<KnowledgeArticle> = withContext(Dispatchers.IO) {
         val results = mutableListOf<KnowledgeArticle>()
+        val safeQuery = query.replace("\"", "").replace("'", "").replace("*", "").trim()
+        if (safeQuery.isBlank()) return@withContext results
         val db = readableDatabase
+
         try {
+            val ftsQuery = safeQuery.split(" ").filter { it.isNotBlank() }.joinToString(" ") { "$it*" }
             val cursor = db.rawQuery(
                 """SELECT a.id, a.title, a.content, a.category, a.source
                    FROM articles a
                    JOIN articles_fts f ON a.id = f.rowid
                    WHERE articles_fts MATCH ?
-                   ORDER BY rank
                    LIMIT ?""",
-                arrayOf(query, limit.toString())
+                arrayOf(ftsQuery, limit.toString())
             )
             cursor.use {
                 while (it.moveToNext()) {
-                    results.add(
-                        KnowledgeArticle(
-                            id = it.getLong(0),
-                            title = it.getString(1),
-                            content = it.getString(2),
-                            category = it.getString(3),
-                            source = it.getString(4)
-                        )
-                    )
+                    results.add(KnowledgeArticle(it.getLong(0), it.getString(1), it.getString(2), it.getString(3), it.getString(4)))
                 }
             }
         } catch (_: Exception) {
-            val cursor = db.rawQuery(
-                """SELECT id, title, content, category, source FROM articles
-                   WHERE title LIKE ? OR content LIKE ?
-                   LIMIT ?""",
-                arrayOf("%$query%", "%$query%", limit.toString())
-            )
-            cursor.use {
-                while (it.moveToNext()) {
-                    results.add(
-                        KnowledgeArticle(
-                            id = it.getLong(0),
-                            title = it.getString(1),
-                            content = it.getString(2),
-                            category = it.getString(3),
-                            source = it.getString(4)
-                        )
-                    )
+            try {
+                val cursor = db.rawQuery(
+                    """SELECT id, title, content, category, source FROM articles
+                       WHERE title LIKE ? OR content LIKE ?
+                       LIMIT ?""",
+                    arrayOf("%$safeQuery%", "%$safeQuery%", limit.toString())
+                )
+                cursor.use {
+                    while (it.moveToNext()) {
+                        results.add(KnowledgeArticle(it.getLong(0), it.getString(1), it.getString(2), it.getString(3), it.getString(4)))
+                    }
                 }
-            }
+            } catch (_: Exception) { }
         }
         results
     }
 
     suspend fun getArticleCount(): Int = withContext(Dispatchers.IO) {
-        val db = readableDatabase
-        val cursor = db.rawQuery("SELECT COUNT(*) FROM articles", null)
-        cursor.use {
-            if (it.moveToFirst()) it.getInt(0) else 0
-        }
+        try {
+            val db = readableDatabase
+            val cursor = db.rawQuery("SELECT COUNT(*) FROM articles", null)
+            cursor.use { if (it.moveToFirst()) it.getInt(0) else 0 }
+        } catch (_: Exception) { 0 }
+    }
+
+    suspend fun getArticleCountByDump(dumpId: String): Int = withContext(Dispatchers.IO) {
+        try {
+            val db = readableDatabase
+            val cursor = db.rawQuery("SELECT COUNT(*) FROM articles WHERE dump_id = ?", arrayOf(dumpId))
+            cursor.use { if (it.moveToFirst()) it.getInt(0) else 0 }
+        } catch (_: Exception) { 0 }
     }
 
     suspend fun getCategories(): List<Pair<String, Int>> = withContext(Dispatchers.IO) {
-        val db = readableDatabase
-        val result = mutableListOf<Pair<String, Int>>()
-        val cursor = db.rawQuery(
-            "SELECT category, COUNT(*) as cnt FROM articles GROUP BY category ORDER BY cnt DESC", null
-        )
-        cursor.use {
-            while (it.moveToNext()) {
-                result.add(it.getString(0) to it.getInt(1))
+        try {
+            val db = readableDatabase
+            val result = mutableListOf<Pair<String, Int>>()
+            val cursor = db.rawQuery(
+                "SELECT category, COUNT(*) as cnt FROM articles GROUP BY category ORDER BY cnt DESC", null
+            )
+            cursor.use {
+                while (it.moveToNext()) {
+                    result.add(it.getString(0) to it.getInt(1))
+                }
             }
-        }
-        result
+            result
+        } catch (_: Exception) { emptyList() }
     }
 
-    suspend fun insertArticle(title: String, content: String, category: String, source: String) = withContext(Dispatchers.IO) {
+    suspend fun insertArticle(title: String, content: String, category: String, source: String, dumpId: String = "custom") = withContext(Dispatchers.IO) {
         val db = writableDatabase
         val values = ContentValues().apply {
             put("title", title)
             put("content", content)
             put("category", category)
             put("source", source)
+            put("dump_id", dumpId)
         }
         db.insert("articles", null, values)
     }
 
     suspend fun importMilitaryDump(context: Context) = withContext(Dispatchers.IO) {
-        val count = getArticleCount()
-        if (count > 0) return@withContext
-
-        val db = writableDatabase
-        db.beginTransaction()
         try {
-            for (article in MilitaryDumpData.articles) {
-                val values = ContentValues().apply {
-                    put("title", article.title)
-                    put("content", article.content)
-                    put("category", article.category)
-                    put("source", article.source)
+            val count = getArticleCountByDump("military")
+            if (count > 0) return@withContext
+
+            val db = writableDatabase
+            db.beginTransaction()
+            try {
+                for (article in MilitaryDumpData.articles) {
+                    val values = ContentValues().apply {
+                        put("title", article.title)
+                        put("content", article.content)
+                        put("category", article.category)
+                        put("source", article.source)
+                        put("dump_id", "military")
+                    }
+                    db.insert("articles", null, values)
                 }
-                db.insert("articles", null, values)
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
             }
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
+        } catch (_: Exception) { }
+    }
+
+    suspend fun deleteDump(dumpId: String) = withContext(Dispatchers.IO) {
+        try {
+            val db = writableDatabase
+            db.delete("articles", "dump_id = ?", arrayOf(dumpId))
+        } catch (_: Exception) { }
     }
 
     suspend fun clearAll() = withContext(Dispatchers.IO) {
-        val db = writableDatabase
-        db.execSQL("DELETE FROM articles")
-        db.execSQL("DELETE FROM articles_fts")
+        try {
+            val db = writableDatabase
+            db.execSQL("DELETE FROM articles")
+            db.execSQL("DELETE FROM articles_fts")
+        } catch (_: Exception) { }
     }
 }
