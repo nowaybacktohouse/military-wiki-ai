@@ -4,6 +4,8 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.util.Log
+import com.localchat.app.util.FtsQuerySanitizer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -12,10 +14,15 @@ data class KnowledgeArticle(
     val title: String,
     val content: String,
     val category: String,
-    val source: String
+    val source: String,
+    val dumpId: String = ""
 )
 
-class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge.db", null, 2) {
+class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge.db", null, 3) {
+
+    companion object {
+        private const val TAG = "KnowledgeDB"
+    }
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
@@ -25,7 +32,8 @@ class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge
                 content TEXT NOT NULL,
                 category TEXT NOT NULL DEFAULT '',
                 source TEXT NOT NULL DEFAULT '',
-                dump_id TEXT NOT NULL DEFAULT 'military'
+                dump_id TEXT NOT NULL DEFAULT 'military',
+                date_added INTEGER NOT NULL DEFAULT 0
             )
         """)
         db.execSQL("""
@@ -46,48 +54,122 @@ class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TRIGGER IF EXISTS articles_ai")
-        db.execSQL("DROP TRIGGER IF EXISTS articles_ad")
-        db.execSQL("DROP TABLE IF EXISTS articles_fts")
-        db.execSQL("DROP TABLE IF EXISTS articles")
-        onCreate(db)
+        if (oldVersion < 3) {
+            db.execSQL("DROP TRIGGER IF EXISTS articles_ai")
+            db.execSQL("DROP TRIGGER IF EXISTS articles_ad")
+            db.execSQL("DROP TABLE IF EXISTS articles_fts")
+            db.execSQL("DROP TABLE IF EXISTS articles")
+            onCreate(db)
+        }
     }
 
-    suspend fun search(query: String, limit: Int = 5): List<KnowledgeArticle> = withContext(Dispatchers.IO) {
+    suspend fun search(query: String, limit: Int = 50, sources: Set<String>? = null): List<KnowledgeArticle> = withContext(Dispatchers.IO) {
         val results = mutableListOf<KnowledgeArticle>()
-        val safeQuery = query.replace("\"", "").replace("'", "").replace("*", "").trim()
-        if (safeQuery.isBlank()) return@withContext results
-        val db = readableDatabase
+        val sanitized = FtsQuerySanitizer.sanitize(query)
 
         try {
-            val ftsQuery = safeQuery.split(" ").filter { it.isNotBlank() }.joinToString(" ") { "$it*" }
-            val cursor = db.rawQuery(
-                """SELECT a.id, a.title, a.content, a.category, a.source
-                   FROM articles a
-                   JOIN articles_fts f ON a.id = f.rowid
-                   WHERE articles_fts MATCH ?
-                   LIMIT ?""",
-                arrayOf(ftsQuery, limit.toString())
-            )
-            cursor.use {
-                while (it.moveToNext()) {
-                    results.add(KnowledgeArticle(it.getLong(0), it.getString(1), it.getString(2), it.getString(3), it.getString(4)))
-                }
-            }
-        } catch (_: Exception) {
-            try {
+            val db = readableDatabase
+            if (sanitized.isBlank()) {
+                val args = mutableListOf<String>()
+                val sourceFilter = buildSourceFilter(sources, args)
+                args.add(limit.toString())
                 val cursor = db.rawQuery(
-                    """SELECT id, title, content, category, source FROM articles
-                       WHERE title LIKE ? OR content LIKE ?
-                       LIMIT ?""",
-                    arrayOf("%$safeQuery%", "%$safeQuery%", limit.toString())
+                    "SELECT id, title, substr(content, 1, 200), category, source, dump_id FROM articles $sourceFilter ORDER BY title ASC LIMIT ?",
+                    args.toTypedArray()
                 )
                 cursor.use {
                     while (it.moveToNext()) {
-                        results.add(KnowledgeArticle(it.getLong(0), it.getString(1), it.getString(2), it.getString(3), it.getString(4)))
+                        results.add(KnowledgeArticle(it.getLong(0), it.getString(1), it.getString(2), it.getString(3), it.getString(4), it.getString(5)))
                     }
                 }
-            } catch (_: Exception) { }
+            } else {
+                val args = mutableListOf(sanitized)
+                val sourceFilter = buildSourceFilterForJoin(sources, args)
+                args.add(limit.toString())
+                val cursor = db.rawQuery(
+                    """SELECT a.id, a.title, snippet(articles_fts, '<b>', '</b>', '...', 1, 40), a.category, a.source, a.dump_id
+                       FROM articles a
+                       JOIN articles_fts f ON a.id = f.rowid
+                       WHERE articles_fts MATCH ?
+                       $sourceFilter
+                       LIMIT ?""",
+                    args.toTypedArray()
+                )
+                cursor.use {
+                    while (it.moveToNext()) {
+                        results.add(KnowledgeArticle(it.getLong(0), it.getString(1), it.getString(2), it.getString(3), it.getString(4), it.getString(5)))
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Search error for query='$query', sanitized='$sanitized'", e)
+            try {
+                val db = readableDatabase
+                val likeQuery = "%${query.take(100)}%"
+                val cursor = db.rawQuery(
+                    "SELECT id, title, substr(content, 1, 200), category, source, dump_id FROM articles WHERE title LIKE ? OR content LIKE ? LIMIT ?",
+                    arrayOf(likeQuery, likeQuery, limit.toString())
+                )
+                cursor.use {
+                    while (it.moveToNext()) {
+                        results.add(KnowledgeArticle(it.getLong(0), it.getString(1), it.getString(2), it.getString(3), it.getString(4), it.getString(5)))
+                    }
+                }
+            } catch (e2: Exception) {
+                Log.e(TAG, "Fallback search also failed", e2)
+            }
+        }
+        results
+    }
+
+    private fun buildSourceFilter(sources: Set<String>?, args: MutableList<String>): String {
+        if (sources == null || sources.isEmpty()) return ""
+        val placeholders = sources.joinToString(",") { "?" }
+        args.addAll(sources)
+        return "WHERE dump_id IN ($placeholders)"
+    }
+
+    private fun buildSourceFilterForJoin(sources: Set<String>?, args: MutableList<String>): String {
+        if (sources == null || sources.isEmpty()) return ""
+        val placeholders = sources.joinToString(",") { "?" }
+        args.addAll(sources)
+        return "AND a.dump_id IN ($placeholders)"
+    }
+
+    suspend fun getArticleById(id: Long): KnowledgeArticle? = withContext(Dispatchers.IO) {
+        try {
+            val db = readableDatabase
+            val cursor = db.rawQuery("SELECT id, title, content, category, source, dump_id FROM articles WHERE id = ?", arrayOf(id.toString()))
+            cursor.use {
+                if (it.moveToFirst()) {
+                    KnowledgeArticle(it.getLong(0), it.getString(1), it.getString(2), it.getString(3), it.getString(4), it.getString(5))
+                } else null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "getArticleById error", e)
+            null
+        }
+    }
+
+    suspend fun getAllArticles(offset: Int = 0, limit: Int = 50, sources: Set<String>? = null): List<KnowledgeArticle> = withContext(Dispatchers.IO) {
+        val results = mutableListOf<KnowledgeArticle>()
+        try {
+            val db = readableDatabase
+            val args = mutableListOf<String>()
+            val sourceFilter = buildSourceFilter(sources, args)
+            args.add(limit.toString())
+            args.add(offset.toString())
+            val cursor = db.rawQuery(
+                "SELECT id, title, substr(content, 1, 200), category, source, dump_id FROM articles $sourceFilter ORDER BY title ASC LIMIT ? OFFSET ?",
+                args.toTypedArray()
+            )
+            cursor.use {
+                while (it.moveToNext()) {
+                    results.add(KnowledgeArticle(it.getLong(0), it.getString(1), it.getString(2), it.getString(3), it.getString(4), it.getString(5)))
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "getAllArticles error", e)
         }
         results
     }
@@ -108,12 +190,12 @@ class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge
         } catch (_: Exception) { 0 }
     }
 
-    suspend fun getCategories(): List<Pair<String, Int>> = withContext(Dispatchers.IO) {
+    suspend fun getAvailableSources(): List<Pair<String, Int>> = withContext(Dispatchers.IO) {
         try {
             val db = readableDatabase
             val result = mutableListOf<Pair<String, Int>>()
             val cursor = db.rawQuery(
-                "SELECT category, COUNT(*) as cnt FROM articles GROUP BY category ORDER BY cnt DESC", null
+                "SELECT dump_id, COUNT(*) as cnt FROM articles GROUP BY dump_id ORDER BY cnt DESC", null
             )
             cursor.use {
                 while (it.moveToNext()) {
@@ -132,6 +214,7 @@ class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge
             put("category", category)
             put("source", source)
             put("dump_id", dumpId)
+            put("date_added", System.currentTimeMillis())
         }
         db.insert("articles", null, values)
     }
@@ -151,6 +234,7 @@ class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge
                         put("category", article.category)
                         put("source", article.source)
                         put("dump_id", "military")
+                        put("date_added", System.currentTimeMillis())
                     }
                     db.insert("articles", null, values)
                 }
@@ -158,14 +242,18 @@ class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge
             } finally {
                 db.endTransaction()
             }
-        } catch (_: Exception) { }
+        } catch (e: Exception) {
+            Log.e(TAG, "importMilitaryDump error", e)
+        }
     }
 
     suspend fun deleteDump(dumpId: String) = withContext(Dispatchers.IO) {
         try {
             val db = writableDatabase
             db.delete("articles", "dump_id = ?", arrayOf(dumpId))
-        } catch (_: Exception) { }
+        } catch (e: Exception) {
+            Log.e(TAG, "deleteDump error", e)
+        }
     }
 
     suspend fun clearAll() = withContext(Dispatchers.IO) {
@@ -173,6 +261,8 @@ class KnowledgeDatabase(context: Context) : SQLiteOpenHelper(context, "knowledge
             val db = writableDatabase
             db.execSQL("DELETE FROM articles")
             db.execSQL("DELETE FROM articles_fts")
-        } catch (_: Exception) { }
+        } catch (e: Exception) {
+            Log.e(TAG, "clearAll error", e)
+        }
     }
 }

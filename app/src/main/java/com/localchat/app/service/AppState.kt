@@ -17,11 +17,15 @@ object AppState {
     private val _loadedModelPath = MutableStateFlow<String?>(null)
     val loadedModelPath: StateFlow<String?> = _loadedModelPath.asStateFlow()
 
+    private val _selectedModelId = MutableStateFlow<String?>(null)
+    val selectedModelId: StateFlow<String?> = _selectedModelId.asStateFlow()
+
     fun setModelLoaded(id: String, name: String, path: String) {
         _loadedModelId.value = id
         _loadedModelName.value = name
         _loadedModelPath.value = path
         _isModelLoaded.value = true
+        _selectedModelId.value = id
     }
 
     fun setModelUnloaded() {
@@ -29,5 +33,17 @@ object AppState {
         _loadedModelName.value = null
         _loadedModelPath.value = null
         _isModelLoaded.value = false
+    }
+
+    fun setSelectedModelId(id: String?) {
+        _selectedModelId.value = id
+    }
+
+    fun setModelSelected(id: String, name: String, path: String) {
+        _selectedModelId.value = id
+        _loadedModelName.value = name
+        _loadedModelPath.value = path
+        _isModelLoaded.value = true
+        _loadedModelId.value = id
     }
 }

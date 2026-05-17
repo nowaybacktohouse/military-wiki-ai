@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
 class LlamaEngine(private val context: Context) {
 
@@ -27,13 +28,14 @@ class LlamaEngine(private val context: Context) {
     private external fun nativeIsModelLoaded(): Boolean
 
     val isModelLoaded: Boolean get() = nativeIsModelLoaded()
+    private val stopRequested = AtomicBoolean(false)
 
     fun init() {
         val nativeLibDir = context.applicationInfo.nativeLibraryDir
         nativeInit(nativeLibDir)
     }
 
-    suspend fun loadModel(modelPath: String): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun loadModel(modelPath: String, systemPrompt: String = ""): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val loadResult = nativeLoadModel(modelPath)
             if (loadResult != 0) return@withContext Result.failure(Exception("Failed to load model (code: $loadResult)"))
@@ -41,8 +43,10 @@ class LlamaEngine(private val context: Context) {
             val prepareResult = nativePrepare()
             if (prepareResult != 0) return@withContext Result.failure(Exception("Failed to prepare model (code: $prepareResult)"))
 
-            val systemPrompt = "Ты — полезный AI-ассистент. Отвечай точно и по делу. Если в контексте есть информация из базы знаний, используй её для ответа."
-            val sysResult = nativeProcessSystemPrompt(systemPrompt)
+            val prompt = systemPrompt.ifBlank {
+                "You are a helpful AI assistant. Answer accurately and to the point. If knowledge base context is provided, use it for your answer."
+            }
+            val sysResult = nativeProcessSystemPrompt(prompt)
             if (sysResult != 0) return@withContext Result.failure(Exception("Failed to set system prompt (code: $sysResult)"))
 
             Result.success(Unit)
@@ -51,20 +55,26 @@ class LlamaEngine(private val context: Context) {
         }
     }
 
+    fun requestStop() {
+        stopRequested.set(true)
+    }
+
     fun generateResponse(userMessage: String, knowledgeContext: String = "", maxTokens: Int = 512): Flow<String> = flow {
+        stopRequested.set(false)
+
         val prompt = if (knowledgeContext.isNotBlank()) {
-            "Контекст из базы знаний:\n$knowledgeContext\n\nВопрос пользователя: $userMessage"
+            "Context from knowledge base:\n$knowledgeContext\n\nUser question: $userMessage"
         } else {
             userMessage
         }
 
         val result = nativeProcessUserPrompt(prompt, maxTokens)
         if (result != 0) {
-            emit("[Ошибка обработки запроса]")
+            emit("[Error processing request]")
             return@flow
         }
 
-        while (true) {
+        while (!stopRequested.get()) {
             val token = nativeGenerateNextToken() ?: break
             if (token.isNotEmpty()) {
                 emit(token)

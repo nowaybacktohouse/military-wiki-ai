@@ -1,14 +1,16 @@
 package com.localchat.app.service
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
+import java.util.concurrent.TimeUnit
 
 data class DownloadProgress(
     val bytesDownloaded: Long,
@@ -22,6 +24,16 @@ data class DownloadProgress(
 
 class DownloadService(private val context: Context) {
 
+    companion object {
+        private const val TAG = "DownloadService"
+    }
+
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .build()
+
     fun getModelsDir(): File {
         val dir = File(context.filesDir, "models")
         if (!dir.exists()) dir.mkdirs()
@@ -29,7 +41,8 @@ class DownloadService(private val context: Context) {
     }
 
     fun getDumpsDir(): File {
-        val dir = File(context.filesDir, "dumps")
+        val dir = context.getExternalFilesDir(null)?.let { File(it, "dumps") }
+            ?: File(context.filesDir, "dumps")
         if (!dir.exists()) dir.mkdirs()
         return dir
     }
@@ -51,40 +64,53 @@ class DownloadService(private val context: Context) {
         try {
             val file = File(destDir, fileName)
             val tempFile = File(destDir, "$fileName.tmp")
+            destDir.mkdirs()
 
-            val connection = URL(url).openConnection() as HttpURLConnection
-            connection.connectTimeout = 30000
-            connection.readTimeout = 30000
+            val requestBuilder = Request.Builder().url(url)
 
-            if (tempFile.exists()) {
-                connection.setRequestProperty("Range", "bytes=${tempFile.length()}-")
+            val startByte: Long
+            if (tempFile.exists() && tempFile.length() > 0) {
+                startByte = tempFile.length()
+                requestBuilder.addHeader("Range", "bytes=$startByte-")
+            } else {
+                startByte = 0L
             }
 
-            connection.connect()
-            val responseCode = connection.responseCode
+            val response = client.newCall(requestBuilder.build()).execute()
+            val responseCode = response.code
 
             val totalBytes: Long
-            val startByte: Long
             val append: Boolean
 
-            if (responseCode == HttpURLConnection.HTTP_PARTIAL) {
-                totalBytes = connection.getHeaderField("Content-Range")
-                    ?.substringAfter("/")?.toLongOrNull() ?: -1L
-                startByte = tempFile.length()
+            if (responseCode == 206) {
+                val contentRange = response.header("Content-Range")
+                totalBytes = contentRange?.substringAfter("/")?.toLongOrNull() ?: -1L
                 append = true
+            } else if (responseCode in 200..299) {
+                totalBytes = (response.body?.contentLength() ?: -1L) + startByte
+                append = startByte == 0L
+                if (!append) {
+                    tempFile.delete()
+                }
             } else {
-                totalBytes = connection.contentLengthLong
-                startByte = 0L
-                append = false
+                emit(DownloadProgress(0, 0, error = "HTTP $responseCode"))
+                response.close()
+                return@flow
             }
 
-            emit(DownloadProgress(startByte, totalBytes))
+            emit(DownloadProgress(if (append) startByte else 0L, totalBytes))
 
-            val inputStream = connection.inputStream
+            val body = response.body ?: run {
+                emit(DownloadProgress(0, 0, error = "Empty response"))
+                response.close()
+                return@flow
+            }
+
+            val inputStream = body.byteStream()
             val outputStream = FileOutputStream(tempFile, append)
             val buffer = ByteArray(8192)
             var bytesRead: Int
-            var downloaded = startByte
+            var downloaded = if (append) startByte else 0L
 
             inputStream.use { input ->
                 outputStream.use { output ->
@@ -96,11 +122,12 @@ class DownloadService(private val context: Context) {
                 }
             }
 
-            connection.disconnect()
+            response.close()
             tempFile.renameTo(file)
             emit(DownloadProgress(downloaded, totalBytes, isComplete = true))
 
         } catch (e: Exception) {
+            Log.e(TAG, "Download error", e)
             emit(DownloadProgress(0, 0, error = e.message ?: "Download failed"))
         }
     }.flowOn(Dispatchers.IO)

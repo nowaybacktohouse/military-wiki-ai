@@ -3,20 +3,25 @@ package com.localchat.app.ui.chat
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.localchat.app.data.model.ChatHistory
 import com.localchat.app.data.model.ChatMessage
 import com.localchat.app.service.AppState
 import com.localchat.app.service.KnowledgeDatabase
 import com.localchat.app.service.LlamaEngine
+import com.localchat.app.service.PreferencesManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val llamaEngine = LlamaEngine(application)
     private val knowledgeDb = KnowledgeDatabase(application)
+    private val prefs = PreferencesManager(application)
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
@@ -24,37 +29,61 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _isGenerating = MutableStateFlow(false)
     val isGenerating: StateFlow<Boolean> = _isGenerating.asStateFlow()
 
-    val isModelLoaded: StateFlow<Boolean> = AppState.isModelLoaded
-    val loadedModelName: StateFlow<String?> = AppState.loadedModelName
+    private val _isModelLoaded = MutableStateFlow(false)
+    val isModelLoaded: StateFlow<Boolean> = _isModelLoaded.asStateFlow()
 
-    private var generateJob: Job? = null
-    private var engineInitialized = false
+    private val _modelName = MutableStateFlow<String?>(null)
+    val modelName: StateFlow<String?> = _modelName.asStateFlow()
+
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
+    private val _chatHistories = MutableStateFlow<List<ChatHistory>>(emptyList())
+    val chatHistories: StateFlow<List<ChatHistory>> = _chatHistories.asStateFlow()
+
+    private val _ragEnabled = MutableStateFlow(true)
+    val ragEnabled: StateFlow<Boolean> = _ragEnabled.asStateFlow()
+
+    private var generationJob: Job? = null
+    private var currentModelPath: String? = null
 
     init {
         llamaEngine.init()
-        engineInitialized = true
+
         viewModelScope.launch {
-            try { knowledgeDb.importMilitaryDump(application) } catch (_: Exception) { }
+            AppState.isModelLoaded.collectLatest { loaded ->
+                _isModelLoaded.value = loaded
+            }
         }
+
         viewModelScope.launch {
-            AppState.loadedModelPath.collect { path ->
-                if (path != null && engineInitialized) {
-                    loadModelInternal(path)
+            AppState.loadedModelName.collectLatest { name ->
+                _modelName.value = name
+            }
+        }
+
+        viewModelScope.launch {
+            AppState.loadedModelPath.collectLatest { path ->
+                if (path != null && path != currentModelPath) {
+                    loadModel(path)
                 }
+            }
+        }
+
+        viewModelScope.launch {
+            prefs.ragEnabled.collectLatest { enabled ->
+                _ragEnabled.value = enabled
             }
         }
     }
 
-    private fun loadModelInternal(modelPath: String) {
-        viewModelScope.launch {
-            val result = llamaEngine.loadModel(modelPath)
-            if (result.isFailure) {
-                AppState.setModelUnloaded()
-                addMessage(ChatMessage(
-                    role = ChatMessage.Role.SYSTEM,
-                    content = "Ошибка загрузки модели: ${result.exceptionOrNull()?.message}"
-                ))
-            }
+    private suspend fun loadModel(path: String) {
+        currentModelPath = path
+        val systemPrompt = prefs.systemPrompt.first()
+        val result = llamaEngine.loadModel(path, systemPrompt)
+        if (result.isFailure) {
+            _error.value = "Failed to load model: ${result.exceptionOrNull()?.message}"
+            AppState.setModelUnloaded()
         }
     }
 
@@ -62,55 +91,78 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (text.isBlank() || _isGenerating.value) return
 
         val userMessage = ChatMessage(role = ChatMessage.Role.USER, content = text)
-        addMessage(userMessage)
+        _messages.value = _messages.value + userMessage
 
-        _isGenerating.value = true
-        generateJob = viewModelScope.launch {
+        generationJob = viewModelScope.launch {
+            _isGenerating.value = true
+            _error.value = null
+
             try {
-                val knowledgeContext = buildKnowledgeContext(text)
+                val maxTokens = prefs.maxTokens.first()
+                val ragOn = _ragEnabled.value
+
+                var knowledgeContext = ""
+                if (ragOn) {
+                    knowledgeContext = buildKnowledgeContext(text)
+                }
+
                 val assistantMessage = ChatMessage(
                     role = ChatMessage.Role.ASSISTANT,
-                    content = ""
+                    content = "",
+                    isStreaming = true
                 )
-                addMessage(assistantMessage)
+                _messages.value = _messages.value + assistantMessage
 
-                val responseBuilder = StringBuilder()
-                llamaEngine.generateResponse(text, knowledgeContext).collect { token ->
-                    responseBuilder.append(token)
-                    updateLastMessage(responseBuilder.toString())
+                val sb = StringBuilder()
+                llamaEngine.generateResponse(text, knowledgeContext, maxTokens).collect { token ->
+                    sb.append(token)
+                    val updated = _messages.value.toMutableList()
+                    updated[updated.lastIndex] = assistantMessage.copy(
+                        content = sb.toString(),
+                        isStreaming = true
+                    )
+                    _messages.value = updated
                 }
 
-                if (responseBuilder.isEmpty()) {
-                    updateLastMessage("[Пустой ответ от модели]")
-                }
+                val updated = _messages.value.toMutableList()
+                updated[updated.lastIndex] = assistantMessage.copy(
+                    content = sb.toString(),
+                    isStreaming = false
+                )
+                _messages.value = updated
+
             } catch (e: Exception) {
-                addMessage(ChatMessage(
-                    role = ChatMessage.Role.ASSISTANT,
-                    content = "Ошибка: ${e.message}"
-                ))
+                _error.value = e.message ?: "Generation error"
             } finally {
                 _isGenerating.value = false
             }
         }
     }
 
-    private suspend fun buildKnowledgeContext(query: String): String {
-        return try {
-            val articles = knowledgeDb.search(query, limit = 3)
-            if (articles.isEmpty()) return ""
-            articles.joinToString("\n\n") { "## ${it.title}\n${it.content}" }
-        } catch (_: Exception) { "" }
+    fun stopGeneration() {
+        llamaEngine.requestStop()
+        generationJob?.cancel()
+        _isGenerating.value = false
+
+        val updated = _messages.value.toMutableList()
+        if (updated.isNotEmpty() && updated.last().isStreaming) {
+            updated[updated.lastIndex] = updated.last().copy(isStreaming = false)
+            _messages.value = updated
+        }
     }
 
-    private fun addMessage(message: ChatMessage) {
-        _messages.value = _messages.value + message
-    }
+    fun regenerateLastResponse() {
+        val msgs = _messages.value.toMutableList()
+        if (msgs.size < 2) return
 
-    private fun updateLastMessage(content: String) {
-        val current = _messages.value.toMutableList()
-        if (current.isNotEmpty()) {
-            current[current.lastIndex] = current.last().copy(content = content)
-            _messages.value = current
+        if (msgs.last().role == ChatMessage.Role.ASSISTANT) {
+            msgs.removeAt(msgs.lastIndex)
+        }
+
+        val lastUserMsg = msgs.lastOrNull { it.role == ChatMessage.Role.USER }
+        if (lastUserMsg != null) {
+            _messages.value = msgs
+            sendMessage(lastUserMsg.content)
         }
     }
 
@@ -118,9 +170,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _messages.value = emptyList()
     }
 
+    fun toggleRag() {
+        viewModelScope.launch {
+            val newVal = !_ragEnabled.value
+            _ragEnabled.value = newVal
+            prefs.setRagEnabled(newVal)
+        }
+    }
+
+    private suspend fun buildKnowledgeContext(query: String): String {
+        return try {
+            val articles = knowledgeDb.search(query, limit = 3)
+            if (articles.isEmpty()) return ""
+            articles.joinToString("\n\n") { "## ${it.title}\n${it.content.take(500)}" }
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    fun dismissError() {
+        _error.value = null
+    }
+
     override fun onCleared() {
         super.onCleared()
-        generateJob?.cancel()
-        llamaEngine.shutdown()
+        llamaEngine.unload()
     }
 }
